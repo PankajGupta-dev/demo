@@ -1,6 +1,6 @@
 # OpsForge Demo Checkout
 
-Production-quality e-commerce checkout microservice built for OpsForge deployment, observability, failure injection, and automated recovery demonstrations.
+Production-quality e-commerce checkout microservice built for OpsForge deployment, observability, failure injection, and automated recovery demonstrations agentic flow.
 
 ## Stack & Architecture
 
