@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsForge Store - Product Catalog</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --accent: #22c55e;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg-color); color: var(--text-main); padding: 2rem; }
+    header { display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto 2rem auto; }
+    h1 { font-size: 1.8rem; font-weight: 700; color: var(--primary); }
+    .cart-badge { background-color: var(--card-bg); border: 1px solid var(--border); padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; color: var(--text-main); }
+    .cart-badge:hover { border-color: var(--primary); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; max-width: 1200px; margin: 0 auto; }
+    .card { background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; display: flex; flex-direction: column; justify-content: space-between; }
+    .card h2 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .card p { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem; flex-grow: 1; }
+    .price { font-size: 1.25rem; font-weight: bold; color: var(--accent); margin-bottom: 1rem; }
+    .btn { background-color: var(--primary); color: #000; border: none; padding: 0.75rem 1rem; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    .btn:hover { background-color: var(--primary-hover); color: #fff; }
+    .stock { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OpsForge Cloud Store</h1>
+    <a href="cart.html" class="cart-badge">🛒 Cart (<span id="cart-count">0</span>)</a>
+  </header>
+
+  <main>
+    <div id="product-list" class="grid">
+      <p>Loading products...</p>
+    </div>
+  </main>
+
+  <script>
+    let customerId = localStorage.getItem('customerId');
+    if (!customerId) {
+      customerId = 'cust_' + Math.random().toString(36).substring(2, 9);
+      localStorage.setItem('customerId', customerId);
+    }
+
+    let cartItems = JSON.parse(localStorage.getItem('cartItems') || '[]');
+    updateCartCount();
+
+    async function loadProducts() {
+      try {
+        const res = await fetch('/products');
+        const data = await res.json();
+        const container = document.getElementById('product-list');
+        container.innerHTML = '';
+
+        if (!data.products || data.products.length === 0) {
+          container.innerHTML = '<p>No products available.</p>';
+          return;
+        }
+
+        data.products.forEach(product => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <div>
+              <h2>${product.name}</h2>
+              <p>${product.description || ''}</p>
+              <div class="stock">In Stock: ${product.stock}</div>
+              <div class="price">$${parseFloat(product.price).toFixed(2)}</div>
+            </div>
+            <button class="btn" onclick="addToCart('${product.id}', '${product.name}', ${product.price})">Add to Cart</button>
+          `;
+          container.appendChild(card);
+        });
+      } catch (err) {
+        document.getElementById('product-list').innerHTML = '<p style="color: #ef4444;">Failed to load products from server.</p>';
+      }
+    }
+
+    function addToCart(productId, name, price) {
+      const existing = cartItems.find(i => i.productId === productId);
+      if (existing) {
+        existing.quantity += 1;
+      } else {
+        cartItems.push({ productId, name, price, quantity: 1 });
+      }
+      localStorage.setItem('cartItems', JSON.stringify(cartItems));
+      updateCartCount();
+      syncCart();
+    }
+
+    function updateCartCount() {
+      const total = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+      document.getElementById('cart-count').textContent = total;
+    }
+
+    async function syncCart() {
+      let sessionId = localStorage.getItem('sessionId');
+      try {
+        const res = await fetch('/cart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, customerId, items: cartItems })
+        });
+        const data = await res.json();
+        if (data.cart && data.cart.sessionId) {
+          localStorage.setItem('sessionId', data.cart.sessionId);
+        }
+      } catch (err) {
+        console.error('Failed to sync cart session with server', err);
+      }
+    }
+
+    loadProducts();
+  </script>
+</body>
+</html>

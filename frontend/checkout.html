@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsForge Store - Checkout Confirmation</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --accent: #22c55e;
+      --danger: #ef4444;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg-color); color: var(--text-main); padding: 2rem; }
+    .container { max-width: 600px; margin: 0 auto; background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; }
+    h1 { font-size: 1.6rem; color: var(--primary); margin-bottom: 1rem; }
+    .order-summary { margin-bottom: 1.5rem; }
+    .item-row { display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+    .total-row { display: flex; justify-content: space-between; font-size: 1.25rem; font-weight: bold; padding-top: 1rem; color: var(--accent); }
+    .btn { width: 100%; background-color: var(--accent); color: #000; border: none; padding: 0.85rem; border-radius: 8px; font-weight: 700; font-size: 1rem; cursor: pointer; margin-top: 1rem; }
+    .btn:hover { background-color: #16a34a; color: #fff; }
+    .status { margin-top: 1rem; padding: 1rem; border-radius: 8px; display: none; }
+    .status.success { background-color: #064e3b; color: #6ee7b7; border: 1px solid #047857; }
+    .status.error { background-color: #7f1d1d; color: #fca5a5; border: 1px solid #b91c1c; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Confirm Your Order</h1>
+    <div id="order-items" class="order-summary"></div>
+    <div class="total-row">
+      <span>Total:</span>
+      <span id="order-total">$0.00</span>
+    </div>
+
+    <button id="pay-btn" class="btn" onclick="submitCheckout()">Complete Purchase</button>
+    <div id="status-box" class="status"></div>
+  </div>
+
+  <script>
+    const cartItems = JSON.parse(localStorage.getItem('cartItems') || '[]');
+    const sessionId = localStorage.getItem('sessionId');
+    const customerId = localStorage.getItem('customerId');
+
+    function renderSummary() {
+      const container = document.getElementById('order-items');
+      let total = 0;
+      container.innerHTML = '';
+
+      cartItems.forEach(item => {
+        const itemTotal = item.price * item.quantity;
+        total += itemTotal;
+
+        const row = document.createElement('div');
+        row.className = 'item-row';
+        row.innerHTML = `<span>${item.name} (x${item.quantity})</span><span>$${itemTotal.toFixed(2)}</span>`;
+        container.appendChild(row);
+      });
+
+      document.getElementById('order-total').textContent = `$${total.toFixed(2)}`;
+    }
+
+    async function submitCheckout() {
+      const btn = document.getElementById('pay-btn');
+      const statusBox = document.getElementById('status-box');
+      btn.disabled = true;
+      btn.textContent = 'Processing Transaction...';
+
+      try {
+        const res = await fetch('/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, customerId })
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.order) {
+          statusBox.className = 'status success';
+          statusBox.style.display = 'block';
+          statusBox.innerHTML = `
+            <h3>✅ Order Placed Successfully!</h3>
+            <p>Order ID: <strong>${data.order.id}</strong></p>
+            <p>Total Charged: <strong>$${parseFloat(data.order.totalAmount).toFixed(2)}</strong></p>
+            <a href="index.html" style="color: #38bdf8; display: inline-block; margin-top: 1rem;">Back to Store</a>
+          `;
+          localStorage.removeItem('cartItems');
+          localStorage.removeItem('sessionId');
+          btn.style.display = 'none';
+        } else {
+          throw new Error(data.error ? data.error.message || data.error : 'Checkout failed');
+        }
+      } catch (err) {
+        statusBox.className = 'status error';
+        statusBox.style.display = 'block';
+        statusBox.textContent = `❌ Checkout Error: ${err.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Retry Purchase';
+      }
+    }
+
+    renderSummary();
+  </script>
+</body>
+</html>
