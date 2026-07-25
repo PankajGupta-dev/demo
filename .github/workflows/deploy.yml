@@ -1,0 +1,198 @@
+﻿name: CI/CD — Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: opsforge-demo-checkout
+  REGISTRY: ghcr.io
+  IMAGE_FULL: ghcr.io/${{ github.repository_owner }}/opsforge-demo-checkout
+
+jobs:
+  # ──────────────────────────────────────────────
+  # JOB 1 — Lint & Dependency Audit
+  # ──────────────────────────────────────────────
+  lint-and-audit:
+    name: Lint & Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --only=production
+
+      - name: Audit for vulnerabilities
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+  # ──────────────────────────────────────────────
+  # JOB 2 — Build & Push Docker Image
+  # ──────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: lint-and-audit
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_FULL }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=true
+            type=raw,value=${{ github.run_number }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          dockerfile: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ──────────────────────────────────────────────
+  # JOB 3 — Deploy to Production
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ secrets.DEPLOY_URL }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e
+
+            echo "==> Pulling latest image..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ${{ env.IMAGE_FULL }}:latest
+
+            echo "==> Stopping old container (if running)..."
+            docker stop opsforge-checkout || true
+            docker rm   opsforge-checkout || true
+
+            echo "==> Starting new container..."
+            docker run -d \
+              --name opsforge-checkout \
+              --restart always \
+              -p 8080:8080 \
+              -e NODE_ENV=production \
+              -e PORT=8080 \
+              -e LOG_LEVEL=${{ secrets.LOG_LEVEL || 'info' }} \
+              -e PGHOST=${{ secrets.PGHOST }} \
+              -e PGPORT=${{ secrets.PGPORT || '5432' }} \
+              -e PGUSER=${{ secrets.PGUSER }} \
+              -e PGPASSWORD=${{ secrets.PGPASSWORD }} \
+              -e PGDATABASE=${{ secrets.PGDATABASE }} \
+              -e PGMAX=${{ secrets.PGMAX || '20' }} \
+              -e PGIDLETIMEOUTMS=${{ secrets.PGIDLETIMEOUTMS || '30000' }} \
+              -e PGCONNECTIONTIMEOUTMS=${{ secrets.PGCONNECTIONTIMEOUTMS || '5000' }} \
+              -e REDIS_HOST=${{ secrets.REDIS_HOST }} \
+              -e REDIS_PORT=${{ secrets.REDIS_PORT || '6379' }} \
+              -e REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
+              -e REDIS_DB=${{ secrets.REDIS_DB || '0' }} \
+              ${{ env.IMAGE_FULL }}:latest
+
+            echo "==> Waiting for health check..."
+            sleep 15
+            docker inspect --format='{{.State.Health.Status}}' opsforge-checkout
+
+            echo "==> Pruning old images..."
+            docker image prune -f
+
+            echo "==> Deploy complete!"
+
+      - name: Verify deployment health
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' opsforge-checkout)
+            echo "Container health: $STATUS"
+            if [ "$STATUS" != "healthy" ]; then
+              echo "ERROR: Container is not healthy after deploy!"
+              docker logs --tail=50 opsforge-checkout
+              exit 1
+            fi
+
+  # ──────────────────────────────────────────────
+  # JOB 4 — Notify on Failure
+  # ──────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [lint-and-audit, build-and-push, deploy]
+    if: failure()
+    steps:
+      - name: Post failure summary
+        run: |
+          echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field       | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository  | ${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch      | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit      | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run         | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
